@@ -134,10 +134,15 @@ module riscv_core #(
     // ---- load-use hazard detection ----
     // If the instruction in EX is a load whose rd is a source of the ID
     // instruction, stall one cycle.
+    // Only fields the instruction really reads count as sources: in I/U/J
+    // formats bits [24:20] (and [19:15] for U/J) are immediate bits, and
+    // matching them against rd caused needless stalls (BUGS.md, bug 1).
     wire idex_mem_read;   // from ID/EX (declared below)
     wire [4:0] idex_rd;
+    wire uses_rs1 = !(opcode == `OP_LUI || opcode == `OP_AUIPC || opcode == `OP_JAL);
+    wire uses_rs2 = (opcode == `OP_RTYPE) || (opcode == `OP_STORE) || (opcode == `OP_BRANCH);
     assign stall = idex_mem_read && (idex_rd != 5'd0) &&
-                   ((idex_rd == rs1) || (idex_rd == rs2));
+                   ((uses_rs1 && idex_rd == rs1) || (uses_rs2 && idex_rd == rs2));
 
     // Bubble injected into ID/EX when stalling or flushing.
     wire id_bubble = stall || pcsrc;
