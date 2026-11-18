@@ -5,6 +5,8 @@
 #   make regress N seeds x all tests in parallel, summary in results/
 #   make cov     regression on the coverage build, coverage summary in results/
 #   make synth   yosys synthesis of the HDL partition (cell count in results/)
+#   make buggy REV=<commit>  rerun the regression on riscv_core.v from an older
+#                commit (see BUGS.md) to watch the bench catch a fixed bug
 #   make clean
 
 VERILATOR ?= verilator
@@ -13,7 +15,7 @@ PYTHON    ?= python3
 JOBS      ?= $(shell getconf _NPROCESSORS_ONLN)
 TEST      ?= rand_mix
 SEED      ?= 1
-SEEDS     ?= 20
+SEEDS     ?= 50
 
 UVM_HOME   := third_party/uvm/src
 UVM_REPO   := https://github.com/chipsalliance/uvm-verilator
@@ -35,7 +37,7 @@ SYS_BIN := build/sys/Vsim
 COV_BIN := build/cov/Vsim
 ALU_BIN := build/alu/Valu
 
-.PHONY: sim alu regress cov synth uvm clean distclean
+.PHONY: sim alu regress cov synth buggy uvm clean distclean
 
 uvm: $(UVM_HOME)/uvm_pkg.sv
 $(UVM_HOME)/uvm_pkg.sv:
@@ -64,8 +66,8 @@ sim: $(SYS_BIN)
 alu: $(ALU_BIN)
 	cd build/alu && VERILATOR_SOLVER="z3 --in" ./Valu +UVM_TESTNAME=alu_test +UVM_NO_RELNOTES | tee ../alu_run.log | grep -E "SCB|RESULT|UVM_(ERROR|FATAL) :"
 
-regress: $(SYS_BIN) alu
-	$(PYTHON) scripts/regress.py --bin $(SYS_BIN) --seeds $(SEEDS) --jobs $(JOBS) --out results/regress
+regress: $(SYS_BIN) $(ALU_BIN)
+	$(PYTHON) scripts/regress.py --bin $(SYS_BIN) --alu-bin $(ALU_BIN) --seeds $(SEEDS) --jobs $(JOBS) --out results/regress
 
 cov: $(COV_BIN)
 	$(PYTHON) scripts/regress.py --bin $(COV_BIN) --seeds $(SEEDS) --jobs $(JOBS) --out results/cov --coverage
@@ -74,6 +76,14 @@ synth:
 	@mkdir -p results
 	$(YOSYS) -q -l results/synth.log -p "read_verilog -Irtl $(RTL) $(HDL); synth -top rv_hdl_core; tee -o results/synth_stat.txt stat"
 	@grep -E "^=== |cells$$" results/synth_stat.txt
+
+buggy: | uvm build
+	@test -n "$(REV)" || (echo "usage: make buggy REV=<commit>  (see BUGS.md)"; false)
+	mkdir -p build/buggy_rtl
+	git show $(REV):rtl/riscv_core.v > build/buggy_rtl/riscv_core.v
+	$(VERILATOR) $(VFLAGS) $(filter-out rtl/riscv_core.v,$(RTL)) build/buggy_rtl/riscv_core.v $(HDL) $(HVL) \
+	  -Mdir build/buggy -o Vsim > build/buggy.log 2>&1 || (tail -30 build/buggy.log; false)
+	-$(PYTHON) scripts/regress.py --bin build/buggy/Vsim --seeds $(SEEDS) --jobs $(JOBS) --out results/buggy
 
 clean:
 	rm -rf build results

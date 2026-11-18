@@ -127,7 +127,7 @@ def write_reports(a, results, reruns, cov_text, wall):
             sigs.setdefault(signature(r["first_err"]), []).append(r)
     md = [f"# Regression summary\n",
           f"**{npass}/{len(results)} passed**, wall time {wall:.1f} s, {a.jobs} parallel jobs\n",
-          "| Test | Runs | Pass | Fail | Retired (sum) | Stalls (sum) | Flushes (sum) |",
+          "| Test | Runs | Pass | Fail | Retired / checks (sum) | Stalls (sum) | Flushes (sum) |",
           "|---|---|---|---|---|---|---|"]
     for t in sorted({r["test"] for r in results}):
         rs = [r for r in results if r["test"] == t]
@@ -163,6 +163,8 @@ def main():
     ap.add_argument("--alu-bin", help="block-level ALU UVM binary (adds test alu_uvm)")
     ap.add_argument("--tests", default="all", help="comma list, or all")
     ap.add_argument("--seeds", type=int, default=10, help="seeds per random test")
+    ap.add_argument("--alu-seeds", type=int, default=10,
+                    help="seeds for alu_uvm (each run takes ~25 s: Verilator calls z3 per randomize())")
     ap.add_argument("--first-seed", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=os.cpu_count())
     ap.add_argument("--timeout", type=int, default=120, help="wall-clock seconds per run")
@@ -171,9 +173,12 @@ def main():
     ap.add_argument("--coverage", action="store_true", help="merge coverage.dat files")
     a = ap.parse_args()
 
-    tests = DIRECTED + RANDOM + (["alu_uvm"] if a.alu_bin else []) if a.tests == "all" else a.tests.split(",")
-    seeds = range(a.first_seed, a.first_seed + a.seeds)
-    jobs = [(t, s) for t in tests for s in (seeds if t not in DIRECTED else [a.first_seed])]
+    tests = (DIRECTED + RANDOM + (["alu_uvm"] if a.alu_bin else [])) if a.tests == "all" else a.tests.split(",")
+    seeds = {t: range(a.first_seed, a.first_seed + a.seeds) for t in tests}
+    seeds.update({t: [a.first_seed] for t in DIRECTED})
+    seeds["alu_uvm"] = range(a.first_seed, a.first_seed + min(a.seeds, a.alu_seeds))
+    jobs = [(t, s) for t in tests for s in seeds[t]]
+    jobs.sort(key=lambda j: j[0] != "alu_uvm")   # start the slow runs first
     shutil.rmtree(a.out, ignore_errors=True)
     os.makedirs(a.out)
 

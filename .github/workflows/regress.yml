@@ -1,0 +1,57 @@
+# Nightly-style regression on every push. Not run locally; Verilator from the
+# distro may be older than 5.050, so it is built from a pinned tag.
+name: regress
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  regress:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps, yosys, z3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git help2man perl python3 make autoconf g++ flex bison \
+            ccache libfl2 libfl-dev zlib1g-dev yosys z3
+
+      - name: Cache Verilator
+        id: vcache
+        uses: actions/cache@v4
+        with:
+          path: ~/verilator
+          key: verilator-v5.050-${{ runner.os }}
+
+      - name: Build Verilator v5.050
+        if: steps.vcache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 -b v5.050 https://github.com/verilator/verilator /tmp/vsrc
+          cd /tmp/vsrc && autoconf && ./configure --prefix=$HOME/verilator && make -j$(nproc) && make install
+
+      - name: Regression (system UVM + ALU UVM)
+        run: |
+          export PATH=$HOME/verilator/bin:$PATH
+          make regress SEEDS=50
+
+      - name: Coverage
+        run: |
+          export PATH=$HOME/verilator/bin:$PATH
+          make cov SEEDS=20
+
+      - name: Synthesis of the HDL partition
+        run: make synth
+
+      - name: Publish summary
+        if: always()
+        run: cat results/regress/summary.md results/cov/summary.md >> $GITHUB_STEP_SUMMARY || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results
+          path: |
+            results/**/summary.md
+            results/**/junit.xml
+            results/synth*.txt
+            results/regress/runs/*_rerun/

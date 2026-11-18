@@ -101,7 +101,10 @@ module core_sva (
     c_branch_not_taken: cover property (idex_valid && idex_branch && !branch_taken);
     c_jal:              cover property (idex_jump && !idex_jalr);
     c_jalr:             cover property (idex_jalr);
-    c_flush_then_stall: cover property (pcsrc ##1 !pcsrc [*2] ##0 stall);
+    // load at a branch target, used by the next instruction. The stall can
+    // only come 3 cycles after the redirect: at +2 the EX stage still holds
+    // the bubble from the flush, so a "##2 stall" cover would be unreachable.
+    c_load_at_target:   cover property (pcsrc ##3 stall);
     c_back2back_taken:  cover property (pcsrc ##3 pcsrc);
     c_store_load_raw:   cover property (exmem_mem_write ##1 exmem_mem_read);
 endmodule
