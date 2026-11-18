@@ -3,9 +3,14 @@
 //   mirror the program, then rm_step once per instruction the RTL retires and
 //   compares pc, rd, write data and store address/data.
 //
-//   It models exactly what the core claims to implement: RV32I integer ops,
-//   LW/SW only, word-addressed memories that wrap at their size (the RTL uses
-//   "addr % WORDS"). Anything else is reported as illegal instead of guessed.
+//   It models exactly what the core claims to implement: RV32I integer ops
+//   and loads/stores of all widths, on word-addressed memories that wrap at
+//   their size (the RTL uses "addr % WORDS"). Anything else (FENCE, ECALL,
+//   CSR, M extension, ...) is reported as illegal, and misaligned accesses as
+//   misaligned, instead of guessed: the core has no traps, so the generator
+//   never produces them.
+//   For a store, the trace reports the whole memory word after the write, so
+//   the byte-lane merge is checked too.
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -77,19 +82,28 @@ int rm_step(int *o_pc, int *o_insn, int *o_rd_we, int *o_rd, int *o_rd_wdata,
         case 7: res = a & i; break;
         }
         break; }
-    case 0x03: { // LW only
-        uint32_t ad = a + (uint32_t)imm_i;
-        if (f3 != 2) { rc = RM_ILLEGAL; wr = 0; break; }
-        if (ad & 3) rc = RM_MISALIGNED;
-        res = dmem[(ad >> 2) % dmem_words];
+    case 0x03: { // LB LH LW LBU LHU
+        uint32_t ad = a + (uint32_t)imm_i, size = 1u << (f3 & 3);
+        uint32_t lane = dmem[(ad >> 2) % dmem_words] >> (8 * (ad & 3));
+        if (f3 == 3 || f3 > 5) { rc = RM_ILLEGAL; wr = 0; break; }
+        if (ad & (size - 1)) rc = RM_MISALIGNED;
+        switch (f3) {
+        case 0: res = (uint32_t)sext(lane & 0xff, 8); break;
+        case 1: res = (uint32_t)sext(lane & 0xffff, 16); break;
+        case 2: res = lane; break;
+        case 4: res = lane & 0xff; break;
+        case 5: res = lane & 0xffff; break;
+        }
         break; }
-    case 0x23: { // SW only
-        uint32_t ad = a + (uint32_t)imm_s;
+    case 0x23: { // SB SH SW
+        uint32_t ad = a + (uint32_t)imm_s, size = 1u << f3, sh = 8 * (ad & 3);
+        uint32_t *w = &dmem[(ad >> 2) % dmem_words];
+        uint32_t mask = size == 4 ? 0xffffffffu : ((1u << (8 * size)) - 1) << sh;
         wr = 0;
-        if (f3 != 2) { rc = RM_ILLEGAL; break; }
-        if (ad & 3) rc = RM_MISALIGNED;
-        dmem[(ad >> 2) % dmem_words] = b;
-        *o_mem_we = 1; *o_mem_addr = (int)ad; *o_mem_wdata = (int)b;
+        if (f3 > 2) { rc = RM_ILLEGAL; break; }
+        if (ad & (size - 1)) rc = RM_MISALIGNED;
+        *w = (*w & ~mask) | ((b << sh) & mask);
+        *o_mem_we = 1; *o_mem_addr = (int)ad; *o_mem_wdata = (int)*w;
         break; }
     case 0x63: { // branches
         int t;
@@ -141,12 +155,18 @@ int main(void) {
         0x00100313, // addi x6, x0, 1    (skipped)
         0x008003ef, // jal  x7, +8       -> x7 = pc+4 = 0x24
         0x00000013, // nop (skipped)
+        0xfff00413, // addi x8, x0, -1
+        0x008000a3, // sb   x8, 1(x0)    -> mem[0] = 0x0000ff0f
+        0x00100483, // lb   x9, 1(x0)    -> -1
+        0x00104503, // lbu  x10, 1(x0)   -> 0xff
+        0x00001583, // lh   x11, 0(x0)   -> 0xffffff0f
         0x0000006f, // j .  (halt)
     };
     rm_reset(256, 256);
     for (unsigned k = 0; k < sizeof prog / 4; k++) rm_load(k, prog[k]);
     while (n++ < 20) { assert(rm_step(&p, &i, &we, &rd, &wd, &mwe, &ma, &mwd) == RM_OK); if (i == 0x6f) break; }
     assert(x[1] == 15 && x[3] == 0xffffffffu && x[4] == 0 && x[5] == 15 && x[6] == 0 && x[7] == 0x24);
+    assert(dmem[0] == 0x0000ff0f && x[9] == 0xffffffffu && x[10] == 0xff && x[11] == 0xffffff0fu);
     printf("rv32i_iss selftest: PASS (%d steps)\n", n);
     return 0;
 }

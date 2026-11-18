@@ -8,7 +8,7 @@ Every program:
 
 Constraints that keep programs legal and terminating:
   - branches and jumps only go forward, so every program halts,
-  - load/store addresses are word aligned and inside data memory,
+  - load/store addresses are naturally aligned and inside data memory,
   - x30 is reserved for auipc+jalr pairs and x31 for the data base, so random
     instructions never write them,
   - sources are biased toward registers written by the last few instructions,
@@ -88,11 +88,17 @@ class Gen:
         elif kind == "upper":
             self.emit(f"{r.choice(['lui', 'auipc'])} x{self.rd()}, {r.randint(0, 0xfffff)}")
         elif kind in ("load", "store"):
-            base, off = (31, 4 * r.randint(-128, 127)) if r.random() < 0.7 else (0, 4 * r.randint(0, 255))
-            if kind == "load":
-                self.emit(f"lw x{self.rd()}, {off}(x{base})")
+            op, size = r.choice([("lb", 1), ("lbu", 1), ("lh", 2), ("lhu", 2), ("lw", 4)] if kind == "load"
+                                else [("sb", 1), ("sh", 2), ("sw", 4)])
+            # naturally aligned, inside the 1 KiB data memory
+            if r.random() < 0.7:
+                base, off = 31, size * r.randint(-512 // size, 511 // size)
             else:
-                self.emit(f"sw x{self.rs()}, {off}(x{base})")
+                base, off = 0, size * r.randint(0, 1023 // size)
+            if kind == "load":
+                self.emit(f"{op} x{self.rd()}, {off}(x{base})")
+            else:
+                self.emit(f"{op} x{self.rs()}, {off}(x{base})")
         elif kind == "branch":
             s1, s2 = self.rs(), self.rs()
             self.emit(f"{r.choice(BR_OPS)} x{s1}, x{s2}, {self.label(r.randint(1, 4))}")

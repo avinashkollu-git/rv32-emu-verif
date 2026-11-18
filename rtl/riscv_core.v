@@ -7,7 +7,8 @@
 //            - branches/jumps resolve in EX; IF/ID and ID/EX are flushed on a
 //              taken redirect (2-cycle penalty)
 //
-//   Memories are word-addressed. Loads/stores are word-granular (LW/SW).
+//   Memories are word-addressed internally; LB/LH/LBU/LHU/SB/SH select byte
+//   lanes inside the word. Misaligned accesses are not trapped (low bits ignored).
 //
 //   Verification changes (rv32-emu-verif copy of the core):
 //     - the program is written through the imem_we port by the HDL-side load
@@ -39,7 +40,7 @@ module riscv_core #(
     output wire [31:0] rvfi_rd_wdata,
     output wire        rvfi_mem_we,    // store retired
     output wire [31:0] rvfi_mem_addr,
-    output wire [31:0] rvfi_mem_wdata,
+    output wire [31:0] rvfi_mem_wdata, // whole memory word after the store
     // pipeline events, for the HDL-side checker's counters
     output wire        dbg_stall,
     output wire        dbg_flush
@@ -260,6 +261,7 @@ module riscv_core #(
     reg [1:0]  exmem_wb_sel;
     reg [31:0] exmem_alu_r, exmem_store, exmem_pc4;
     reg [4:0]  exmem_rd_r;
+    reg [2:0]  exmem_funct3;   // load/store width and sign
     reg        exmem_valid;
     reg [31:0] exmem_pc, exmem_instr;
 
@@ -271,7 +273,7 @@ module riscv_core #(
         if (!rst_n) begin
             exmem_reg_write_r <= 1'b0; exmem_mem_read <= 1'b0; exmem_mem_write <= 1'b0;
             exmem_wb_sel <= 2'd0; exmem_alu_r <= 32'd0; exmem_store <= 32'd0;
-            exmem_pc4 <= 32'd0; exmem_rd_r <= 5'd0;
+            exmem_pc4 <= 32'd0; exmem_rd_r <= 5'd0; exmem_funct3 <= 3'd0;
             exmem_valid <= 1'b0; exmem_pc <= 32'd0; exmem_instr <= 32'd0;
         end else begin
             exmem_reg_write_r <= idex_reg_write;
@@ -282,6 +284,7 @@ module riscv_core #(
             exmem_store       <= fwd_rs2;     // store data (forwarded)
             exmem_pc4         <= idex_pc4;
             exmem_rd_r        <= idex_rd_r;
+            exmem_funct3      <= idex_funct3;
             exmem_valid       <= idex_valid;
             exmem_pc          <= idex_pc;
             exmem_instr       <= idex_instr;
@@ -297,9 +300,24 @@ module riscv_core #(
 
     wire [31:0] mem_rdata = dmem[exmem_alu_r[31:2] % DMEM_WORDS];
 
+    // Sub-word stores: replicate the data across the lanes and merge it with
+    // the current word under a byte-enable mask (read-modify-write in one cycle,
+    // since the read port is asynchronous). funct3: 0 = SB, 1 = SH, 2 = SW.
+    wire [1:0]  st_off  = exmem_alu_r[1:0];
+    wire [3:0]  st_be   = (exmem_funct3[1:0] == 2'd0) ? (4'b0001 << st_off) :
+                          (exmem_funct3[1:0] == 2'd1) ? (st_off[1] ? 4'b1100 : 4'b0011) :
+                                                        4'b1111;
+    wire [31:0] st_data = (exmem_funct3[1:0] == 2'd0) ? {4{exmem_store[7:0]}} :
+                          (exmem_funct3[1:0] == 2'd1) ? {2{exmem_store[15:0]}} :
+                                                        exmem_store;
+    wire [31:0] st_word = {st_be[3] ? st_data[31:24] : mem_rdata[31:24],
+                           st_be[2] ? st_data[23:16] : mem_rdata[23:16],
+                           st_be[1] ? st_data[15:8]  : mem_rdata[15:8],
+                           st_be[0] ? st_data[7:0]   : mem_rdata[7:0]};
+
     always @(posedge clk) begin
         if (exmem_mem_write)
-            dmem[exmem_alu_r[31:2] % DMEM_WORDS] <= exmem_store;
+            dmem[exmem_alu_r[31:2] % DMEM_WORDS] <= st_word;
     end
 
     // =====================================================================
@@ -309,6 +327,7 @@ module riscv_core #(
     reg [1:0]  memwb_wb_sel;
     reg [31:0] memwb_alu, memwb_mem, memwb_pc4;
     reg [4:0]  memwb_rd;
+    reg [2:0]  memwb_funct3;
     reg        memwb_valid, memwb_mem_write;
     reg [31:0] memwb_pc, memwb_instr, memwb_store;
 
@@ -316,7 +335,7 @@ module riscv_core #(
         if (!rst_n) begin
             memwb_reg_write <= 1'b0; memwb_wb_sel <= 2'd0;
             memwb_alu <= 32'd0; memwb_mem <= 32'd0; memwb_pc4 <= 32'd0; memwb_rd <= 5'd0;
-            memwb_valid <= 1'b0; memwb_mem_write <= 1'b0;
+            memwb_valid <= 1'b0; memwb_mem_write <= 1'b0; memwb_funct3 <= 3'd0;
             memwb_pc <= 32'd0; memwb_instr <= 32'd0; memwb_store <= 32'd0;
         end else begin
             memwb_reg_write <= exmem_reg_write_r;
@@ -329,17 +348,32 @@ module riscv_core #(
             memwb_mem_write <= exmem_mem_write;
             memwb_pc        <= exmem_pc;
             memwb_instr     <= exmem_instr;
-            memwb_store     <= exmem_store;
+            memwb_store     <= st_word;       // the full word written, for the trace
+            memwb_funct3    <= exmem_funct3;
         end
     end
 
     // =====================================================================
     // WB stage
     // =====================================================================
+    // Sub-word loads: shift the addressed lane down, then sign/zero extend.
+    // funct3: 0 = LB, 1 = LH, 2 = LW, 4 = LBU, 5 = LHU.
+    wire [31:0] ld_lane = memwb_mem >> {memwb_alu[1:0], 3'b000};
+    reg  [31:0] load_data;
+    always @(*) begin
+        case (memwb_funct3)
+            3'b000:  load_data = {{24{ld_lane[7]}},  ld_lane[7:0]};
+            3'b001:  load_data = {{16{ld_lane[15]}}, ld_lane[15:0]};
+            3'b100:  load_data = {24'd0, ld_lane[7:0]};
+            3'b101:  load_data = {16'd0, ld_lane[15:0]};
+            default: load_data = memwb_mem;
+        endcase
+    end
+
     reg [31:0] wb_mux;
     always @(*) begin
         case (memwb_wb_sel)
-            `WB_MEM: wb_mux = memwb_mem;
+            `WB_MEM: wb_mux = load_data;
             `WB_PC4: wb_mux = memwb_pc4;
             default: wb_mux = memwb_alu;
         endcase

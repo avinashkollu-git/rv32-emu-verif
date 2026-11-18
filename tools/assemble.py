@@ -3,8 +3,8 @@
 
 Supports the instruction subset used by this core's tests:
   R:   add sub and or xor sll srl sra slt sltu
-  I:   addi andi ori xori slli srli srai slti sltiu  jalr  lw
-  S:   sw
+  I:   addi andi ori xori slli srli srai slti sltiu  jalr  lb lh lw lbu lhu
+  S:   sb sh sw
   B:   beq bne blt bge bltu bgeu
   U:   lui auipc
   J:   jal
@@ -39,6 +39,8 @@ I_FUNCT = {  # ALU-immediate
     "addi":0x0,"slti":0x2,"sltiu":0x3,"xori":0x4,"ori":0x6,"andi":0x7,
     "slli":0x1,"srli":0x5,"srai":0x5,
 }
+LOAD_FUNCT = {"lb":0x0,"lh":0x1,"lw":0x2,"lbu":0x4,"lhu":0x5}
+STORE_FUNCT = {"sb":0x0,"sh":0x1,"sw":0x2}
 B_FUNCT = {"beq":0x0,"bne":0x1,"blt":0x4,"bge":0x5,"bltu":0x6,"bgeu":0x7}
 
 def enc_r(rd,rs1,rs2,f7,f3):
@@ -98,10 +100,10 @@ def assemble(text):
             w = enc_i(reg(a[0]),reg(a[1]),iv,f3)
         elif op == "jalr":
             w = enc_i(reg(a[0]),reg(a[1]),int(a[2],0),0x0,op=0x67)
-        elif op == "lw":
-            off,rs1 = parse_mem(" ".join(a[1:])); w = enc_i(reg(a[0]),rs1,off,0x2,op=0x03)
-        elif op == "sw":
-            off,rs1 = parse_mem(" ".join(a[1:])); w = enc_s(rs1,reg(a[0]),off,0x2)
+        elif op in LOAD_FUNCT:
+            off,rs1 = parse_mem(" ".join(a[1:])); w = enc_i(reg(a[0]),rs1,off,LOAD_FUNCT[op],op=0x03)
+        elif op in STORE_FUNCT:
+            off,rs1 = parse_mem(" ".join(a[1:])); w = enc_s(rs1,reg(a[0]),off,STORE_FUNCT[op])
         elif op in B_FUNCT:
             tgt = labels[a[2]] if a[2] in labels else int(a[2],0)
             w = enc_b(reg(a[0]),reg(a[1]),tgt-pc,B_FUNCT[op])
