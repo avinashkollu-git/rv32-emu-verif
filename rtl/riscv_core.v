@@ -7,20 +7,42 @@
 //            - branches/jumps resolve in EX; IF/ID and ID/EX are flushed on a
 //              taken redirect (2-cycle penalty)
 //
-//   Memories are word-addressed. Program is loaded from a hex file given by the
-//   IMEM_FILE parameter via $readmemh. Loads/stores are word-granular (LW/SW).
+//   Memories are word-addressed. Loads/stores are word-granular (LW/SW).
+//
+//   Verification changes (rv32-emu-verif copy of the core):
+//     - the program is written through the imem_we port by the HDL-side load
+//       transactor instead of $readmemh, so one compiled model runs any test
+//     - a retire trace port (rvfi-style) reports every instruction that leaves
+//       WB, so the testbench can compare each one with the C reference model
+//     - a valid bit travels with each instruction so flushed bubbles never retire
 // -----------------------------------------------------------------------------
 `timescale 1ns / 1ps
 `default_nettype none
 `include "riscv_defs.vh"
 
 module riscv_core #(
-    parameter IMEM_FILE = "program.hex",
-    parameter integer IMEM_WORDS = 64,    // instruction ROM depth (assembler pads to this)
-    parameter integer DMEM_WORDS = 64
+    parameter integer IMEM_WORDS = 256,
+    parameter integer DMEM_WORDS = 256
 ) (
-    input  wire clk,
-    input  wire rst_n
+    input  wire        clk,
+    input  wire        rst_n,
+    // program load port (word address), used while the core is held in reset
+    input  wire        imem_we,
+    input  wire [31:0] imem_waddr,
+    input  wire [31:0] imem_wdata,
+    // retire trace: one pulse per instruction leaving WB, in program order
+    output wire        rvfi_valid,
+    output wire [31:0] rvfi_pc,
+    output wire [31:0] rvfi_insn,
+    output wire        rvfi_rd_we,     // register write happened (rd != x0)
+    output wire [4:0]  rvfi_rd,
+    output wire [31:0] rvfi_rd_wdata,
+    output wire        rvfi_mem_we,    // store retired
+    output wire [31:0] rvfi_mem_addr,
+    output wire [31:0] rvfi_mem_wdata,
+    // pipeline events, for the HDL-side checker's counters
+    output wire        dbg_stall,
+    output wire        dbg_flush
 );
     // =====================================================================
     // IF stage
@@ -30,11 +52,12 @@ module riscv_core #(
 
     reg  [31:0] imem [0:IMEM_WORDS-1];
     integer imem_i;
-    initial begin
+    initial
         for (imem_i = 0; imem_i < IMEM_WORDS; imem_i = imem_i + 1)
             imem[imem_i] = 32'h0000_0000;   // unprogrammed words default to 0 (NOP-ish)
-        $readmemh(IMEM_FILE, imem);
-    end
+
+    always @(posedge clk)
+        if (imem_we) imem[imem_waddr % IMEM_WORDS] <= imem_wdata;
 
     wire [31:0] if_instr = imem[pc[31:2] % IMEM_WORDS];
 
@@ -54,16 +77,20 @@ module riscv_core #(
     // IF/ID pipeline register
     // =====================================================================
     reg [31:0] ifid_pc, ifid_instr;
+    reg        ifid_valid;
     always @(posedge clk) begin
         if (!rst_n || pcsrc) begin       // flush on redirect
             ifid_pc    <= 32'd0;
             ifid_instr <= 32'd0;         // NOP bubble
+            ifid_valid <= 1'b0;
         end else if (stall) begin        // hold
             ifid_pc    <= ifid_pc;
             ifid_instr <= ifid_instr;
+            ifid_valid <= ifid_valid;
         end else begin
             ifid_pc    <= pc;
             ifid_instr <= if_instr;
+            ifid_valid <= 1'b1;
         end
     end
 
@@ -125,6 +152,8 @@ module riscv_core #(
     reg [2:0]  idex_funct3;
     reg [31:0] idex_pc, idex_rd1, idex_rd2, idex_imm;
     reg [4:0]  idex_rs1, idex_rs2, idex_rd_r;
+    reg        idex_valid;
+    reg [31:0] idex_instr;
 
     assign idex_mem_read = idex_mem_read_r;
     assign idex_rd       = idex_rd_r;
@@ -137,6 +166,7 @@ module riscv_core #(
             idex_alu_ctrl  <= 4'd0; idex_funct3     <= 3'd0;
             idex_pc  <= 32'd0; idex_rd1 <= 32'd0; idex_rd2 <= 32'd0; idex_imm <= 32'd0;
             idex_rs1 <= 5'd0;  idex_rs2 <= 5'd0;  idex_rd_r <= 5'd0;
+            idex_valid <= 1'b0; idex_instr <= 32'd0;
         end else begin
             idex_reg_write <= c_reg_write; idex_mem_read_r <= c_mem_read;
             idex_mem_write <= c_mem_write; idex_alu_src    <= c_alu_src;
@@ -146,6 +176,7 @@ module riscv_core #(
             idex_funct3    <= funct3;
             idex_pc  <= ifid_pc; idex_rd1 <= rd1; idex_rd2 <= rd2; idex_imm <= imm;
             idex_rs1 <= rs1;     idex_rs2 <= rs2; idex_rd_r <= rd;
+            idex_valid <= ifid_valid; idex_instr <= ifid_instr;
         end
     end
 
@@ -224,6 +255,8 @@ module riscv_core #(
     reg [1:0]  exmem_wb_sel;
     reg [31:0] exmem_alu_r, exmem_store, exmem_pc4;
     reg [4:0]  exmem_rd_r;
+    reg        exmem_valid;
+    reg [31:0] exmem_pc, exmem_instr;
 
     assign exmem_reg_write = exmem_reg_write_r;
     assign exmem_rd        = exmem_rd_r;
@@ -234,6 +267,7 @@ module riscv_core #(
             exmem_reg_write_r <= 1'b0; exmem_mem_read <= 1'b0; exmem_mem_write <= 1'b0;
             exmem_wb_sel <= 2'd0; exmem_alu_r <= 32'd0; exmem_store <= 32'd0;
             exmem_pc4 <= 32'd0; exmem_rd_r <= 5'd0;
+            exmem_valid <= 1'b0; exmem_pc <= 32'd0; exmem_instr <= 32'd0;
         end else begin
             exmem_reg_write_r <= idex_reg_write;
             exmem_mem_read    <= idex_mem_read_r;
@@ -243,6 +277,9 @@ module riscv_core #(
             exmem_store       <= fwd_rs2;     // store data (forwarded)
             exmem_pc4         <= idex_pc4;
             exmem_rd_r        <= idex_rd_r;
+            exmem_valid       <= idex_valid;
+            exmem_pc          <= idex_pc;
+            exmem_instr       <= idex_instr;
         end
     end
 
@@ -267,11 +304,15 @@ module riscv_core #(
     reg [1:0]  memwb_wb_sel;
     reg [31:0] memwb_alu, memwb_mem, memwb_pc4;
     reg [4:0]  memwb_rd;
+    reg        memwb_valid, memwb_mem_write;
+    reg [31:0] memwb_pc, memwb_instr, memwb_store;
 
     always @(posedge clk) begin
         if (!rst_n) begin
             memwb_reg_write <= 1'b0; memwb_wb_sel <= 2'd0;
             memwb_alu <= 32'd0; memwb_mem <= 32'd0; memwb_pc4 <= 32'd0; memwb_rd <= 5'd0;
+            memwb_valid <= 1'b0; memwb_mem_write <= 1'b0;
+            memwb_pc <= 32'd0; memwb_instr <= 32'd0; memwb_store <= 32'd0;
         end else begin
             memwb_reg_write <= exmem_reg_write_r;
             memwb_wb_sel    <= exmem_wb_sel;
@@ -279,6 +320,11 @@ module riscv_core #(
             memwb_mem       <= mem_rdata;
             memwb_pc4       <= exmem_pc4;
             memwb_rd        <= exmem_rd_r;
+            memwb_valid     <= exmem_valid;
+            memwb_mem_write <= exmem_mem_write;
+            memwb_pc        <= exmem_pc;
+            memwb_instr     <= exmem_instr;
+            memwb_store     <= exmem_store;
         end
     end
 
@@ -297,6 +343,21 @@ module riscv_core #(
     assign wb_reg_write = memwb_reg_write;
     assign wb_rd        = memwb_rd;
     assign wb_data      = wb_mux;
+
+    // =====================================================================
+    // Retire trace (verification only; no effect on the datapath)
+    // =====================================================================
+    assign rvfi_valid     = memwb_valid;
+    assign rvfi_pc        = memwb_pc;
+    assign rvfi_insn      = memwb_instr;
+    assign rvfi_rd_we     = memwb_valid && memwb_reg_write && (memwb_rd != 5'd0);
+    assign rvfi_rd        = memwb_rd;
+    assign rvfi_rd_wdata  = wb_mux;
+    assign rvfi_mem_we    = memwb_valid && memwb_mem_write;
+    assign rvfi_mem_addr  = memwb_alu;
+    assign rvfi_mem_wdata = memwb_store;
+    assign dbg_stall      = stall;
+    assign dbg_flush      = pcsrc;
 
 endmodule
 

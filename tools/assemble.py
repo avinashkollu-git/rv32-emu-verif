@@ -63,12 +63,9 @@ def parse_mem(op):  # "off(reg)" -> (off, reg)
     m = re.match(r"\s*(-?\w+)\s*\(\s*(\w+)\s*\)", op)
     return int(m.group(1),0), reg(m.group(2))
 
-def main():
-    src, out = sys.argv[1], sys.argv[2]
-    # optional 3rd arg: pad the image out to this many words with 0x00000000 so
-    # it exactly fills the core's instruction ROM (avoids a $readmemh range note).
-    pad = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    lines = open(src).read().splitlines()
+def assemble(text):
+    """Assemble source text, return the list of 32-bit instruction words."""
+    lines = text.splitlines()
     # pass 1: addresses + labels
     prog, labels, addr = [], {}, 0
     for ln in lines:
@@ -118,7 +115,14 @@ def main():
         else:
             raise ValueError(f"unknown instruction: {op}")
         words.append(w & 0xffffffff)
+    return words
 
+def main():
+    src, out = sys.argv[1], sys.argv[2]
+    # optional 3rd arg: pad the image out to this many words with 0x00000000 so
+    # it exactly fills the core's instruction ROM (avoids a $readmemh range note).
+    pad = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    words = assemble(open(src).read())
     n = len(words)
     if pad and n < pad:
         words += [0] * (pad - n)           # zero-fill remaining ROM words
