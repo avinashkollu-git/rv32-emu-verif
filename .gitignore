@@ -1,0 +1,6 @@
+build/
+results/
+third_party/uvm/
+*.vcd
+__pycache__/
+obj_dir/
