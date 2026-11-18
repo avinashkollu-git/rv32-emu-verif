@@ -32,12 +32,12 @@ jobs:
       - name: Regression (system UVM + ALU UVM)
         run: |
           export PATH=$HOME/verilator/bin:$PATH
-          make regress SEEDS=50
+          make regress SEEDS=50 JOBS=$(nproc)
 
       - name: Coverage
         run: |
           export PATH=$HOME/verilator/bin:$PATH
-          make cov SEEDS=20
+          make cov SEEDS=20 JOBS=$(nproc)
 
       - name: Synthesis of the HDL partition
         run: make synth

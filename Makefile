@@ -2,7 +2,7 @@
 #
 #   make sim     build the system-level UVM bench and run one test (TEST=..., SEED=...)
 #   make alu     block-level UVM bench for the ALU
-#   make regress N seeds x all tests in parallel, summary in results/
+#   make regress N seeds x all tests (JOBS workers, default 1), summary in results/
 #   make cov     regression on the coverage build, coverage summary in results/
 #   make synth   yosys synthesis of the HDL partition (cell count in results/)
 #   make buggy REV=<commit>  rerun the regression on riscv_core.v from an older
@@ -12,10 +12,11 @@
 VERILATOR ?= verilator
 YOSYS     ?= yosys
 PYTHON    ?= python3
-JOBS      ?= $(shell getconf _NPROCESSORS_ONLN)
+# 1 job by default to keep CPU load low; raise with e.g. make regress JOBS=8
+JOBS      ?= 1
 TEST      ?= rand_mix
 SEED      ?= 1
-SEEDS     ?= 50
+SEEDS     ?= 10
 
 UVM_HOME   := third_party/uvm/src
 UVM_REPO   := https://github.com/chipsalliance/uvm-verilator

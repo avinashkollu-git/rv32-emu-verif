@@ -164,9 +164,9 @@ def main():
     ap.add_argument("--tests", default="all", help="comma list, or all")
     ap.add_argument("--seeds", type=int, default=10, help="seeds per random test")
     ap.add_argument("--alu-seeds", type=int, default=10,
-                    help="seeds for alu_uvm (each run takes ~25 s: Verilator calls z3 per randomize())")
+                    help="seeds for alu_uvm (each run takes ~7 s on one core: Verilator calls z3 per randomize())")
     ap.add_argument("--first-seed", type=int, default=1)
-    ap.add_argument("--jobs", type=int, default=os.cpu_count())
+    ap.add_argument("--jobs", type=int, default=1, help="parallel workers (default 1: keeps CPU load low)")
     ap.add_argument("--timeout", type=int, default=120, help="wall-clock seconds per run")
     ap.add_argument("--out", default="results/regress")
     ap.add_argument("--waves", action="store_true", help="dump waves for every run")
